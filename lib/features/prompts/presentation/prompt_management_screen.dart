@@ -224,7 +224,28 @@ class PromptManagementScreen extends ConsumerWidget {
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Expanded(child: Image.network(prompt.imageUrl, fit: BoxFit.cover)),
+                        Expanded(
+                          child: Image.network(
+                            prompt.imageUrl,
+                            fit: BoxFit.cover,
+                            errorBuilder: (context, error, stackTrace) {
+                              // The source link is dead/broken — surface it in
+                              // the same "Needs Cleanup" queue as text issues,
+                              // once, instead of leaving it silently broken.
+                              if (!prompt.needsCleanup) {
+                                WidgetsBinding.instance.addPostFrameCallback((_) {
+                                  ref.read(firebaseServiceProvider).flagImageNeedsCleanup(prompt.id);
+                                });
+                              }
+                              return Container(
+                                color: Colors.red.withValues(alpha: 0.12),
+                                child: const Center(
+                                  child: Icon(Icons.broken_image, color: Colors.redAccent, size: 40),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
                         Padding(
                           padding: const EdgeInsets.all(8.0),
                           child: Column(
@@ -304,6 +325,19 @@ class PromptManagementScreen extends ConsumerWidget {
                             ),
                             tooltip: prompt.isPublished ? "Unpublish" : "Publish",
                             onPressed: () => ref.read(firebaseServiceProvider).updatePromptPublished(prompt.id, !prompt.isPublished),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        bottom: 8,
+                        left: 8,
+                        child: CircleAvatar(
+                          backgroundColor: Colors.black54,
+                          radius: 18,
+                          child: IconButton(
+                            icon: const Icon(Icons.edit, color: Colors.lightBlueAccent, size: 18),
+                            tooltip: "Edit image & prompt",
+                            onPressed: () => _showEditPromptDialog(context, ref, prompt),
                           ),
                         ),
                       ),
@@ -404,6 +438,148 @@ class PromptManagementScreen extends ConsumerWidget {
     } catch (e) {
       debugPrint("Batch update failed: $e");
     }
+  }
+
+  void _showEditPromptDialog(BuildContext context, WidgetRef ref, ImagePrompt prompt) {
+    final categoryController = TextEditingController(text: prompt.category);
+    final promptController = TextEditingController(text: prompt.hiddenPrompt);
+    bool isPremium = prompt.isPremium;
+    String gender = prompt.gender;
+    dynamic newImageBytes; // null until admin picks a replacement
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text("Edit Prompt"),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                GestureDetector(
+                  onTap: () async {
+                    final bytes = await ImagePickerWeb.getImageAsBytes();
+                    if (bytes != null) {
+                      setState(() => newImageBytes = bytes);
+                    }
+                  },
+                  child: Container(
+                    height: 150,
+                    width: double.infinity,
+                    decoration: BoxDecoration(
+                      color: Colors.white10,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.white24),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: newImageBytes != null
+                          ? Image.memory(newImageBytes, fit: BoxFit.cover)
+                          : Image.network(
+                              prompt.imageUrl,
+                              fit: BoxFit.cover,
+                              errorBuilder: (context, error, stackTrace) => const Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.broken_image, size: 40, color: Colors.redAccent),
+                                  SizedBox(height: 8),
+                                  Text("Current image is broken — tap to replace", style: TextStyle(fontSize: 12)),
+                                ],
+                              ),
+                            ),
+                    ),
+                  ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: Text("Tap image to replace it", style: TextStyle(fontSize: 11, color: Colors.white54)),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: categoryController,
+                  decoration: const InputDecoration(labelText: "Category Name", border: OutlineInputBorder()),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: promptController,
+                  decoration: const InputDecoration(
+                    labelText: "Hidden AI Prompt",
+                    border: OutlineInputBorder(),
+                    helperText: "Strip any leftover Midjourney parameters here (--ar, --v, --stylize, etc.)",
+                  ),
+                  maxLines: 6,
+                ),
+                const SizedBox(height: 16),
+                DropdownButtonFormField<String>(
+                  initialValue: gender,
+                  decoration: const InputDecoration(labelText: "Shows in gallery for", border: OutlineInputBorder()),
+                  items: const [
+                    DropdownMenuItem(value: 'unisex', child: Text("Everyone (unisex)")),
+                    DropdownMenuItem(value: 'male', child: Text("Male")),
+                    DropdownMenuItem(value: 'female', child: Text("Female")),
+                    DropdownMenuItem(value: 'couple', child: Text("Couple (2 photos)")),
+                  ],
+                  onChanged: (val) => setState(() => gender = val ?? 'unisex'),
+                ),
+                const SizedBox(height: 16),
+                SwitchListTile(
+                  title: const Text("Premium Prompt"),
+                  subtitle: const Text("Only visible to paid users"),
+                  value: isPremium,
+                  activeThumbColor: Colors.amber,
+                  onChanged: (val) => setState(() => isPremium = val),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+            ElevatedButton(
+              onPressed: () async {
+                if (categoryController.text.trim().isEmpty || promptController.text.trim().isEmpty) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Category and prompt text can't be empty")),
+                  );
+                  return;
+                }
+
+                showDialog(
+                  context: context,
+                  barrierDismissible: false,
+                  builder: (context) => const Center(child: CircularProgressIndicator()),
+                );
+
+                try {
+                  String imageUrl = prompt.imageUrl;
+                  if (newImageBytes != null) {
+                    imageUrl = await ref.read(firebaseServiceProvider).uploadImageWeb(newImageBytes);
+                  }
+                  await ref.read(firebaseServiceProvider).updatePromptDetails(
+                        prompt.id,
+                        imageUrl: imageUrl,
+                        category: categoryController.text.trim(),
+                        hiddenPrompt: promptController.text.trim(),
+                        gender: gender,
+                        isPremium: isPremium,
+                      );
+                  if (!context.mounted) return;
+                  Navigator.pop(context); // Pop loading
+                  Navigator.pop(context); // Pop dialog
+                } catch (e) {
+                  if (!context.mounted) return;
+                  Navigator.pop(context); // Pop loading
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text("Update failed: $e")),
+                  );
+                }
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.lightBlueAccent),
+              child: const Text("Save Changes"),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _showGenderPicker(BuildContext context, WidgetRef ref, ImagePrompt prompt) {

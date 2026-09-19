@@ -247,6 +247,38 @@ class FirebaseService {
     await _firestore.collection('prompts').doc(id).update({'isPublished': isPublished});
   }
 
+  /// Flags a prompt for manual cleanup because its image failed to load in
+  /// the grid (broken/dead source link) — not just for leftover Midjourney
+  /// text. Called once, client-side, the first time `Image.network` reports
+  /// an error for that card, so broken-image prompts surface in the same
+  /// "Needs Cleanup" queue instead of silently sitting broken in the app.
+  Future<void> flagImageNeedsCleanup(String id) async {
+    await _firestore.collection('prompts').doc(id).update({'needsCleanup': true});
+  }
+
+  /// Full manual edit of an existing prompt — used to fix whatever put it in
+  /// "Needs Cleanup": swap in a working image, rewrite the prompt text (e.g.
+  /// strip Midjourney parameters), and adjust category/gender/premium.
+  /// `needsCleanup` is recomputed from the saved text so a prompt that's been
+  /// fixed drops out of that filter on its own.
+  Future<void> updatePromptDetails(
+    String id, {
+    required String imageUrl,
+    required String category,
+    required String hiddenPrompt,
+    required String gender,
+    required bool isPremium,
+  }) async {
+    await _firestore.collection('prompts').doc(id).update({
+      'imageUrl': imageUrl,
+      'category': category,
+      'hiddenPrompt': hiddenPrompt,
+      'gender': gender,
+      'isPremium': isPremium,
+      'needsCleanup': textNeedsCleanup(hiddenPrompt),
+    });
+  }
+
   Future<void> updateMultiplePromptsPublished(List<String> ids, bool isPublished) async {
     final batch = _firestore.batch();
     for (var id in ids) {
