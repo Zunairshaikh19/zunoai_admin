@@ -3,7 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../users/presentation/user_management_screen.dart';
 
 class AdminLoginScreen extends ConsumerStatefulWidget {
-  const AdminLoginScreen({super.key});
+  final String? error;
+
+  const AdminLoginScreen({super.key, this.error});
 
   @override
   ConsumerState<AdminLoginScreen> createState() => _AdminLoginScreenState();
@@ -13,6 +15,20 @@ class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _isLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.error != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(widget.error!)),
+          );
+        }
+      });
+    }
+  }
 
   Future<void> _login() async {
     setState(() => _isLoading = true);

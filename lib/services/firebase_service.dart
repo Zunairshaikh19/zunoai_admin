@@ -1,8 +1,8 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
-import 'dart:typed_data';
 import '../models/user_model.dart';
 import '../models/image_prompt.dart';
 import '../models/support_message.dart';
@@ -11,13 +11,28 @@ class FirebaseService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
 
-  // ImgBB API Key
-  static const String _imgBBKey = "d06e36c9de1d91a12a0c824e8c8837e4";
+  // ImgBB API Key — pass at build time with:
+  //   flutter build web --dart-define=IMGBB_API_KEY=your_key
+  // (rotate the old key on imgbb.com since it was previously committed to source control)
+  static const String _imgBBKey = String.fromEnvironment('IMGBB_API_KEY');
 
   // --- Auth ---
   Future<UserCredential> adminLogin(String email, String password) async {
-    // Note: In a real app, you'd check if this user has 'admin' role in Firestore
-    return await _auth.signInWithEmailAndPassword(email: email, password: password);
+    final credential = await _auth.signInWithEmailAndPassword(email: email, password: password);
+    final uid = credential.user?.uid;
+    if (uid == null || !await isAdmin(uid)) {
+      await _auth.signOut();
+      throw FirebaseAuthException(
+        code: 'not-admin',
+        message: 'This account does not have admin access.',
+      );
+    }
+    return credential;
+  }
+
+  Future<bool> isAdmin(String uid) async {
+    final doc = await _firestore.collection('admins').doc(uid).get();
+    return doc.exists;
   }
 
   // --- Users ---
@@ -30,9 +45,35 @@ class FirebaseService {
     await _firestore.collection('users').doc(uid).update({'isBlocked': block});
   }
 
-  Future<void> giveUserCoins(String uid, int amount) async {
+  Future<void> giveUserCoins(String uid, int amount, {String? reason}) async {
     await _firestore.collection('users').doc(uid).update({
       'coins': FieldValue.increment(amount),
+    });
+    // Audit trail: who granted what, when, and why — so a coin balance can
+    // always be explained later.
+    await _firestore.collection('coinAdjustments').add({
+      'uid': uid,
+      'amount': amount,
+      'reason': reason ?? 'Manual grant',
+      'adminEmail': _auth.currentUser?.email,
+      'timestamp': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// Manually grants or revokes premium — the escape hatch for fixing a
+  /// customer whose purchase didn't activate correctly. `days == null`
+  /// revokes premium immediately.
+  Future<void> setPremiumTier(String uid, {int? days}) async {
+    if (days == null) {
+      await _firestore.collection('users').doc(uid).update({
+        'tier': 'free',
+        'premiumExpiresAt': null,
+      });
+      return;
+    }
+    await _firestore.collection('users').doc(uid).update({
+      'tier': 'paid',
+      'premiumExpiresAt': Timestamp.fromDate(DateTime.now().add(Duration(days: days))),
     });
   }
 
@@ -51,7 +92,7 @@ class FirebaseService {
 
     for (var data in jsonList) {
       if (shouldCancel != null && shouldCancel()) {
-        print("Bulk upload cancelled by user");
+        debugPrint("Bulk upload cancelled by user");
         break;
       }
       try {
@@ -77,7 +118,7 @@ class FirebaseService {
         count++;
         onProgress(count, total);
       } catch (e) {
-        print("Failed to upload prompt: $e");
+        debugPrint("Failed to upload prompt: $e");
         // Continue with others
       }
     }
@@ -138,6 +179,10 @@ class FirebaseService {
   Stream<List<SupportMessage>> getMessages(String ticketId) {
     return _firestore.collection('support_tickets').doc(ticketId).collection('messages').orderBy('timestamp', descending: true).snapshots().map((snapshot) =>
         snapshot.docs.map((doc) => SupportMessage.fromMap(doc.data(), doc.id)).toList());
+  }
+
+  Future<void> setTicketStatus(String ticketId, String status) async {
+    await _firestore.collection('support_tickets').doc(ticketId).update({'status': status});
   }
 
   Future<void> sendAdminMessage(String ticketId, String text) async {

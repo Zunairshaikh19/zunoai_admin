@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../../models/user_model.dart';
 import '../../users/presentation/user_management_screen.dart';
 
 class MarketingScreen extends ConsumerStatefulWidget {
@@ -163,6 +162,28 @@ class _MarketingScreenState extends ConsumerState<MarketingScreen> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Please select at least one user")));
       return;
     }
+
+    final audience = _targetType == 'Global'
+        ? "ALL users"
+        : _targetType == 'Single'
+            ? "1 user"
+            : "${_selectedUserIds.length} selected users";
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Send this notification?"),
+        content: Text(
+          "This will send \"$title\" to $audience"
+          "${coins > 0 ? ' and grant $coins coins to each' : ''}. This can't be undone.",
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel")),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text("Send")),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
 
     setState(() => _isSending = true);
 

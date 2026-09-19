@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker_web/image_picker_web.dart';
 import 'package:file_picker/file_picker.dart' as fp;
@@ -142,6 +143,8 @@ class PromptManagementScreen extends ConsumerWidget {
               onTap: () {
                 if (isSelectionMode) {
                   _toggleSelection(ref, prompt.id);
+                } else {
+                  _showPromptTextDialog(context, prompt);
                 }
               },
               onLongPress: () => _toggleSelection(ref, prompt.id),
@@ -222,6 +225,36 @@ class PromptManagementScreen extends ConsumerWidget {
   );
 }
 
+  void _showPromptTextDialog(BuildContext context, ImagePrompt prompt) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(prompt.category),
+        content: SizedBox(
+          width: 400,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              prompt.hiddenPrompt.isEmpty ? "(No prompt text set)" : prompt.hiddenPrompt,
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text("Close")),
+          ElevatedButton.icon(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: prompt.hiddenPrompt));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Prompt copied to clipboard")),
+              );
+            },
+            icon: const Icon(Icons.copy, size: 16),
+            label: const Text("Copy Prompt"),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _toggleSelection(WidgetRef ref, String id) {
     final current = ref.read(selectedPromptsProvider);
     final notifier = ref.read(selectedPromptsProvider.notifier);
@@ -270,7 +303,7 @@ class PromptManagementScreen extends ConsumerWidget {
       await ref.read(firebaseServiceProvider).updateMultiplePromptsPremiumStatus(selectedIds.toList(), isPremium);
       ref.read(selectedPromptsProvider.notifier).state = {};
     } catch (e) {
-      print("Batch update failed: $e");
+      debugPrint("Batch update failed: $e");
     }
   }
 

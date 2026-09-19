@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../presentation/admin_root_screen.dart';
 import '../../users/presentation/user_management_screen.dart';
 import '../../../models/user_model.dart';
 import '../../prompts/presentation/prompt_management_screen.dart';
@@ -51,6 +50,36 @@ class StatsDashboardScreen extends ConsumerWidget {
               ],
             ),
             const SizedBox(height: 32),
+            const Text("Revenue & Engagement", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 16),
+            usersAsync.when(
+              data: (users) {
+                final paid = users.where((u) => u.tier == UserTier.paid).length;
+                final mrr = paid * 4.99;
+                final totalCoins = users.fold<int>(0, (sum, u) => sum + u.coins);
+                final activeToday = users.where((u) {
+                  final last = u.lastActivity;
+                  if (last == null) return false;
+                  return DateTime.now().difference(last).inHours < 24;
+                }).length;
+                final conversionRate = users.isEmpty ? 0.0 : (paid / users.length) * 100;
+
+                return Row(
+                  children: [
+                    _StatCard("Est. MRR", "\$${mrr.toStringAsFixed(2)}", Icons.attach_money, Colors.green),
+                    const SizedBox(width: 16),
+                    _StatCard("Active Today", "$activeToday", Icons.bolt, Colors.cyan),
+                    const SizedBox(width: 16),
+                    _StatCard("Free → Paid", "${conversionRate.toStringAsFixed(1)}%", Icons.trending_up, Colors.pinkAccent),
+                    const SizedBox(width: 16),
+                    _StatCard("Coins in Circulation", "$totalCoins", Icons.generating_tokens, Colors.amberAccent),
+                  ],
+                );
+              },
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (err, _) => Text("Error: $err"),
+            ),
+            const SizedBox(height: 32),
             promptsAsync.when(
               data: (prompts) => Row(
                 children: [
@@ -62,16 +91,10 @@ class StatsDashboardScreen extends ConsumerWidget {
               loading: () => const Center(child: CircularProgressIndicator()),
               error: (err, _) => Text("Error: $err"),
             ),
-            const SizedBox(height: 48),
-            const Text("Recent Activity (Upcoming)", style: TextStyle(fontSize: 18, color: Colors.white38)),
           ],
         ),
       ),
     );
-  }
-
-  Widget _statCard(String title, String value, IconData icon, Color color) {
-    return _StatCard(title, value, icon, color);
   }
 }
 

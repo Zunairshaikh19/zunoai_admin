@@ -9,6 +9,7 @@ class UserModel {
   final String? photoUrl;
   final int coins;
   final UserTier tier;
+  final DateTime? premiumExpiresAt;
   final String referralCode;
   final int referralCount;
   final bool isBlocked;
@@ -22,6 +23,7 @@ class UserModel {
     this.photoUrl,
     required this.coins,
     required this.tier,
+    this.premiumExpiresAt,
     required this.referralCode,
     required this.referralCount,
     required this.isBlocked,
@@ -37,6 +39,7 @@ class UserModel {
       photoUrl: data['photoUrl'],
       coins: data['coins'] ?? 0,
       tier: data['tier'] == 'paid' ? UserTier.paid : UserTier.free,
+      premiumExpiresAt: (data['premiumExpiresAt'] as Timestamp?)?.toDate(),
       referralCode: data['referralCode'] ?? '',
       referralCount: data['referralCount'] ?? 0,
       isBlocked: data['isBlocked'] ?? false,

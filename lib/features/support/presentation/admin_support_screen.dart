@@ -42,8 +42,14 @@ class _AdminSupportScreenState extends ConsumerState<AdminSupportScreen> {
                   return Consumer(
                     builder: (context, ref, child) {
                       final userAsync = ref.watch(userStreamProvider(ticket['userId']));
+                      final isOpen = (ticket['status'] ?? 'open') != 'closed';
                       return ListTile(
                         selected: selectedTicketId == ticket['id'],
+                        leading: Icon(
+                          isOpen ? Icons.mark_email_unread : Icons.check_circle,
+                          color: isOpen ? Colors.amber : Colors.white24,
+                          size: 18,
+                        ),
                         title: userAsync.when(
                           data: (user) => Text(user?.email ?? ticket['userId'], style: const TextStyle(fontWeight: FontWeight.bold)),
                           loading: () => const Text("Loading...", style: TextStyle(color: Colors.white24)),
@@ -68,14 +74,54 @@ class _AdminSupportScreenState extends ConsumerState<AdminSupportScreen> {
           Expanded(
             child: selectedTicketId == null
                 ? const Center(child: Text("Select a ticket to view conversation"))
-                : Row(
+                : Column(
                     children: [
-                      Expanded(child: _ChatArea(ticketId: selectedTicketId!)),
-                      const VerticalDivider(width: 1),
-                      if (selectedUserId != null)
-                        _UserActionPanel(uid: selectedUserId!),
+                      _TicketStatusBar(ticketId: selectedTicketId!, tickets: ticketsAsync.valueOrNull ?? []),
+                      Expanded(
+                        child: Row(
+                          children: [
+                            Expanded(child: _ChatArea(ticketId: selectedTicketId!)),
+                            const VerticalDivider(width: 1),
+                            if (selectedUserId != null)
+                              _UserActionPanel(uid: selectedUserId!),
+                          ],
+                        ),
+                      ),
                     ],
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TicketStatusBar extends ConsumerWidget {
+  final String ticketId;
+  final List<Map<String, dynamic>> tickets;
+  const _TicketStatusBar({required this.ticketId, required this.tickets});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final matches = tickets.where((t) => t['id'] == ticketId);
+    final ticket = matches.isEmpty ? null : matches.first;
+    final isOpen = (ticket?['status'] ?? 'open') != 'closed';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      color: Colors.white.withOpacity(0.03),
+      child: Row(
+        children: [
+          Chip(
+            label: Text(isOpen ? "OPEN" : "CLOSED"),
+            backgroundColor: isOpen ? Colors.amber.withOpacity(0.2) : Colors.white12,
+          ),
+          const Spacer(),
+          TextButton.icon(
+            onPressed: () => ref.read(firebaseServiceProvider).setTicketStatus(ticketId, isOpen ? 'closed' : 'open'),
+            icon: Icon(isOpen ? Icons.check_circle_outline : Icons.replay),
+            label: Text(isOpen ? "Mark Resolved" : "Reopen"),
           ),
         ],
       ),
@@ -106,6 +152,7 @@ class _UserActionPanel extends ConsumerWidget {
                 Text("Email: ${user.email}", style: const TextStyle(fontSize: 12)),
                 const SizedBox(height: 8),
                 Text("Coins: ${user.coins}"),
+                Text("Tier: ${user.tier.name.toUpperCase()}${user.premiumExpiresAt != null ? ' (until ${DateFormat.yMMMd().format(user.premiumExpiresAt!)})' : ''}"),
                 const SizedBox(height: 24),
                 ElevatedButton(
                   onPressed: () => ref.read(firebaseServiceProvider).toggleUserBlock(user.uid, !user.isBlocked),
@@ -123,7 +170,13 @@ class _UserActionPanel extends ConsumerWidget {
                     foregroundColor: Colors.black,
                     minimumSize: const Size(double.infinity, 45),
                   ),
-                  child: const Text("Give 100 Coins"),
+                  child: const Text("Grant Coins"),
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton(
+                  onPressed: () => showSetPremiumDialog(context, ref, user),
+                  style: OutlinedButton.styleFrom(minimumSize: const Size(double.infinity, 45)),
+                  child: Text(user.tier == UserTier.paid ? "Edit Premium" : "Grant Premium"),
                 ),
               ],
             ),
@@ -136,16 +189,39 @@ class _UserActionPanel extends ConsumerWidget {
   }
 
   void _showAddCoinsDialog(BuildContext context, WidgetRef ref, String uid) {
+    final amountController = TextEditingController(text: "100");
+    final reasonController = TextEditingController();
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text("Add Coins"),
-        content: const Text("Are you sure you want to grant 100 coins to this user?"),
+        title: const Text("Grant Coins"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: amountController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: "Amount"),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: reasonController,
+              decoration: const InputDecoration(labelText: "Reason (optional, kept in the audit log)"),
+            ),
+          ],
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
           ElevatedButton(
             onPressed: () {
-              ref.read(firebaseServiceProvider).giveUserCoins(uid, 100);
+              final amount = int.tryParse(amountController.text) ?? 0;
+              if (amount != 0) {
+                ref.read(firebaseServiceProvider).giveUserCoins(
+                      uid,
+                      amount,
+                      reason: reasonController.text.trim().isEmpty ? null : reasonController.text.trim(),
+                    );
+              }
               Navigator.pop(context);
             },
             child: const Text("Confirm"),

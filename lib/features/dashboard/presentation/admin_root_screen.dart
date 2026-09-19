@@ -3,6 +3,7 @@ import '../../users/presentation/user_management_screen.dart';
 import '../../prompts/presentation/prompt_management_screen.dart';
 import '../../support/presentation/admin_support_screen.dart';
 import '../../marketing/presentation/marketing_screen.dart';
+import '../../calculator/presentation/cost_calculator_screen.dart';
 
 import '../presentation/stats_dashboard_screen.dart';
 import '../../settings/presentation/admin_settings_screen.dart';
@@ -23,6 +24,7 @@ class _AdminRootScreenState extends State<AdminRootScreen> {
     const PromptManagementScreen(),
     const AdminSupportScreen(),
     const MarketingScreen(),
+    const CostCalculatorScreen(),
     const AdminSettingsScreen(),
   ];
 
@@ -44,6 +46,7 @@ class _AdminRootScreenState extends State<AdminRootScreen> {
               NavigationRailDestination(icon: Icon(Icons.art_track), label: Text('Prompts')),
               NavigationRailDestination(icon: Icon(Icons.support_agent), label: Text('Support')),
               NavigationRailDestination(icon: Icon(Icons.campaign), label: Text('Marketing')),
+              NavigationRailDestination(icon: Icon(Icons.calculate), label: Text('Calculator')),
               NavigationRailDestination(icon: Icon(Icons.settings), label: Text('Settings')),
             ],
           ),

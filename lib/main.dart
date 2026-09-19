@@ -4,6 +4,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'features/dashboard/presentation/admin_root_screen.dart';
 import 'features/auth/presentation/admin_login_screen.dart';
+import 'services/firebase_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -50,7 +51,21 @@ class AdminAuthWrapper extends ConsumerWidget {
           return const Scaffold(body: Center(child: CircularProgressIndicator()));
         }
         if (snapshot.hasData) {
-          return const AdminRootScreen();
+          return FutureBuilder<bool>(
+            future: FirebaseService().isAdmin(snapshot.data!.uid),
+            builder: (context, adminSnapshot) {
+              if (adminSnapshot.connectionState == ConnectionState.waiting) {
+                return const Scaffold(body: Center(child: CircularProgressIndicator()));
+              }
+              if (adminSnapshot.data == true) {
+                return const AdminRootScreen();
+              }
+              FirebaseAuth.instance.signOut();
+              return const AdminLoginScreen(
+                error: 'This account does not have admin access.',
+              );
+            },
+          );
         }
         return const AdminLoginScreen();
       },
