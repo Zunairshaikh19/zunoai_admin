@@ -106,6 +106,39 @@ class FirebaseService {
 
   static bool textNeedsCleanup(String text) => _midjourneyFlagPattern.hasMatch(text);
 
+  // Supabase edge function that downloads an image server-side and re-hosts
+  // it on ImgBB — see supabase/functions/mirror-image in the main app repo.
+  // Same Supabase project as the app's generate-image function, so it shares
+  // its IMGBB_API_KEY / FIREBASE_SERVICE_ACCOUNT_KEY secrets already.
+  static const String _mirrorImageUrl = "https://ylenfbneddyuzrkckaul.supabase.co/functions/v1/mirror-image";
+
+  Future<String> _mirrorImageServerSide(String imageUrl) async {
+    final user = _auth.currentUser;
+    if (user == null) throw "Not authenticated";
+    final idToken = await user.getIdToken();
+
+    final res = await http.post(
+      Uri.parse(_mirrorImageUrl),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $idToken',
+      },
+      body: jsonEncode({'imageUrl': imageUrl}),
+    );
+
+    Map<String, dynamic> data;
+    try {
+      data = jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (_) {
+      throw "Mirror function returned an unexpected response (HTTP ${res.statusCode})";
+    }
+
+    if (res.statusCode == 200 && data['success'] == true) {
+      return data['imageUrl'] as String;
+    }
+    throw data['error'] ?? "Mirror function failed (HTTP ${res.statusCode})";
+  }
+
   /// Bulk-imports prompts from a JSON list, skipping anything whose
   /// `hiddenPrompt` text already exists (either already live in Firestore, or
   /// earlier in this same batch) so re-running an import — or importing an
@@ -156,23 +189,19 @@ class FirebaseService {
 
         String imageUrl = data['imageUrl'] ?? '';
 
-        // Best-effort: mirror external images to ImgBB so we're not
-        // permanently dependent on a third-party bucket staying up. This is
-        // skipped for anything already on imgbb.com, and — since this admin
-        // panel runs as Flutter Web — a source host with no CORS headers
-        // (common for buckets like R2/S3 meant for <img> tags, not fetch())
-        // will make the browser refuse the download outright
-        // ("ClientException: Failed to fetch"). That's not a reason to lose
-        // the whole prompt: fall back to the original URL, which still works
-        // fine as an <img src> even without CORS.
+        // Mirror external images to ImgBB via a server-side Supabase function
+        // instead of downloading them in-browser: Flutter Web can't read the
+        // bytes of an image from a host that doesn't send CORS headers (most
+        // buckets don't — they're built for <img> tags, not fetch()), so a
+        // direct browser download throws "Failed to fetch" for those. The
+        // server-side function has no such restriction. If it still fails for
+        // some other reason (source genuinely offline, etc.), fall back to
+        // the original URL rather than losing the whole prompt.
         if (imageUrl.isNotEmpty && imageUrl.startsWith('http') && !imageUrl.contains('imgbb.com')) {
           try {
-            final response = await http.get(Uri.parse(imageUrl));
-            if (response.statusCode == 200) {
-              imageUrl = await uploadImageWeb(response.bodyBytes);
-            }
+            imageUrl = await _mirrorImageServerSide(imageUrl);
           } catch (e) {
-            debugPrint("Could not re-host image, keeping original URL ($imageUrl): $e");
+            debugPrint("Could not mirror image, keeping original URL ($imageUrl): $e");
           }
         }
 

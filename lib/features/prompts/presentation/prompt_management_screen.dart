@@ -241,7 +241,10 @@ class PromptManagementScreen extends ConsumerWidget {
                                     label: prompt.isPublished ? "Published" : "Draft",
                                     color: prompt.isPublished ? Colors.lightGreenAccent : Colors.orange,
                                   ),
-                                  _StatusPill(label: prompt.gender, color: Colors.blueGrey.shade200),
+                                  GestureDetector(
+                                    onTap: () => _showGenderPicker(context, ref, prompt),
+                                    child: _StatusPill(label: "${prompt.gender} ✎", color: Colors.blueGrey.shade200),
+                                  ),
                                   if (prompt.needsCleanup)
                                     const _StatusPill(label: "Needs Cleanup", color: Colors.redAccent),
                                 ],
@@ -401,6 +404,33 @@ class PromptManagementScreen extends ConsumerWidget {
     } catch (e) {
       debugPrint("Batch update failed: $e");
     }
+  }
+
+  void _showGenderPicker(BuildContext context, WidgetRef ref, ImagePrompt prompt) {
+    const options = ['unisex', 'male', 'female', 'couple'];
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text("Shows in gallery for", style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+            for (final option in options)
+              ListTile(
+                title: Text(option[0].toUpperCase() + option.substring(1)),
+                trailing: prompt.gender == option ? const Icon(Icons.check, color: Colors.purpleAccent) : null,
+                onTap: () {
+                  ref.read(firebaseServiceProvider).updatePromptGender(prompt.id, option);
+                  Navigator.pop(context);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _handleBatchPublish(WidgetRef ref, Set<String> selectedIds, bool isPublished) async {
