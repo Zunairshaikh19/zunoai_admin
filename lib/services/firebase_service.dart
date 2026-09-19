@@ -82,46 +82,152 @@ class FirebaseService {
     await _firestore.collection('prompts').add(prompt.toMap());
   }
 
-  Future<void> bulkUploadPrompts(
-    List<Map<String, dynamic>> jsonList, 
+  // Midjourney-style parameters that mean nothing to the Gemini model we
+  // actually generate with — if these are still in the text, the prompt is
+  // flagged for manual cleanup rather than auto-edited (admin reviews and
+  // fixes the wording by hand, then publishes).
+  static final RegExp _midjourneyFlagPattern = RegExp(r'--(ar|v|stylize|sref|raw|profile|chaos|weird|niji|q|seed|style)\b', caseSensitive: false);
+
+  static final RegExp _maleWordPattern = RegExp(r'\b(man|men|boy|boys|male|guy|guys|groom|husband|father|dad)\b', caseSensitive: false);
+  static final RegExp _femaleWordPattern = RegExp(r'\b(woman|women|girl|girls|female|lady|ladies|bride|wife|mother|mom)\b', caseSensitive: false);
+
+  /// Best-effort gender tag from the prompt's own wording — used only to
+  /// pre-fill the tag so admin doesn't have to set every one by hand; still
+  /// editable afterward. Mentions of both -> 'couple', one -> that gender,
+  /// neither -> 'unisex'.
+  static String detectGenderFromText(String text) {
+    final hasMale = _maleWordPattern.hasMatch(text);
+    final hasFemale = _femaleWordPattern.hasMatch(text);
+    if (hasMale && hasFemale) return 'couple';
+    if (hasMale) return 'male';
+    if (hasFemale) return 'female';
+    return 'unisex';
+  }
+
+  static bool textNeedsCleanup(String text) => _midjourneyFlagPattern.hasMatch(text);
+
+  /// Bulk-imports prompts from a JSON list, skipping anything whose
+  /// `hiddenPrompt` text already exists (either already live in Firestore, or
+  /// earlier in this same batch) so re-running an import — or importing an
+  /// overlapping file — never creates duplicates. Every prompt this creates
+  /// is a draft (`isPublished: false`): it never shows in the app until an
+  /// admin reviews and publishes it here. `needsCleanup` flags prompts whose
+  /// text still has raw Midjourney parameters, and `gender` is pre-filled by
+  /// keyword-matching the prompt text — both are just starting points the
+  /// admin can still edit before publishing.
+  Future<BulkUploadResult> bulkUploadPrompts(
+    List<Map<String, dynamic>> jsonList,
     Function(int, int) onProgress, {
     bool Function()? shouldCancel,
   }) async {
-    int count = 0;
-    int total = jsonList.length;
+    int processed = 0;
+    int added = 0;
+    int skippedDuplicate = 0;
+    int flaggedForCleanup = 0;
+    final total = jsonList.length;
+
+    // Existing prompts predate any JSON `id` scheme (some have no `id` field
+    // at all), so the only reliable dedup key across old and new data is the
+    // hiddenPrompt text itself.
+    final existingSnapshot = await _firestore.collection('prompts').get();
+    final seenHiddenPrompts = <String>{
+      for (final doc in existingSnapshot.docs)
+        if ((doc.data()['hiddenPrompt'] as String? ?? '').trim().isNotEmpty)
+          (doc.data()['hiddenPrompt'] as String).trim(),
+    };
 
     for (var data in jsonList) {
       if (shouldCancel != null && shouldCancel()) {
         debugPrint("Bulk upload cancelled by user");
         break;
       }
+      processed++;
       try {
+        final hiddenPrompt = (data['hiddenPrompt'] ?? '').toString().trim();
+
+        if (hiddenPrompt.isEmpty || seenHiddenPrompts.contains(hiddenPrompt)) {
+          skippedDuplicate++;
+          onProgress(processed, total);
+          continue;
+        }
+        // Reserve it immediately so a duplicate later in the same batch is
+        // also caught, not just duplicates against pre-existing docs.
+        seenHiddenPrompts.add(hiddenPrompt);
+
         String imageUrl = data['imageUrl'] ?? '';
-        
-        // If image URL is from external source, download and re-upload to ImgBB
+
+        // Best-effort: mirror external images to ImgBB so we're not
+        // permanently dependent on a third-party bucket staying up. This is
+        // skipped for anything already on imgbb.com, and — since this admin
+        // panel runs as Flutter Web — a source host with no CORS headers
+        // (common for buckets like R2/S3 meant for <img> tags, not fetch())
+        // will make the browser refuse the download outright
+        // ("ClientException: Failed to fetch"). That's not a reason to lose
+        // the whole prompt: fall back to the original URL, which still works
+        // fine as an <img src> even without CORS.
         if (imageUrl.isNotEmpty && imageUrl.startsWith('http') && !imageUrl.contains('imgbb.com')) {
-          final response = await http.get(Uri.parse(imageUrl));
-          if (response.statusCode == 200) {
-            imageUrl = await uploadImageWeb(response.bodyBytes);
+          try {
+            final response = await http.get(Uri.parse(imageUrl));
+            if (response.statusCode == 200) {
+              imageUrl = await uploadImageWeb(response.bodyBytes);
+            }
+          } catch (e) {
+            debugPrint("Could not re-host image, keeping original URL ($imageUrl): $e");
           }
         }
+
+        final needsCleanup = textNeedsCleanup(hiddenPrompt);
+        if (needsCleanup) flaggedForCleanup++;
 
         final prompt = ImagePrompt(
           id: '',
           imageUrl: imageUrl,
           category: data['category'] ?? 'General',
-          hiddenPrompt: data['hiddenPrompt'] ?? '',
+          hiddenPrompt: hiddenPrompt,
           isPremium: data['isPremium'] ?? false,
+          gender: detectGenderFromText(hiddenPrompt),
+          isPublished: false,
+          needsCleanup: needsCleanup,
         );
 
         await addPrompt(prompt);
-        count++;
-        onProgress(count, total);
+        added++;
+        onProgress(processed, total);
       } catch (e) {
         debugPrint("Failed to upload prompt: $e");
         // Continue with others
       }
     }
+
+    debugPrint(
+      "Bulk upload done: $added added, $skippedDuplicate skipped (duplicate), "
+      "$flaggedForCleanup flagged for cleanup, out of $total total.",
+    );
+
+    return BulkUploadResult(
+      total: total,
+      added: added,
+      skippedDuplicate: skippedDuplicate,
+      flaggedForCleanup: flaggedForCleanup,
+    );
+  }
+
+  /// New prompts land as drafts (see [bulkUploadPrompts]); this is how an
+  /// admin makes one visible in the app after reviewing it.
+  Future<void> updatePromptPublished(String id, bool isPublished) async {
+    await _firestore.collection('prompts').doc(id).update({'isPublished': isPublished});
+  }
+
+  Future<void> updateMultiplePromptsPublished(List<String> ids, bool isPublished) async {
+    final batch = _firestore.batch();
+    for (var id in ids) {
+      batch.update(_firestore.collection('prompts').doc(id), {'isPublished': isPublished});
+    }
+    await batch.commit();
+  }
+
+  Future<void> updatePromptGender(String id, String gender) async {
+    await _firestore.collection('prompts').doc(id).update({'gender': gender});
   }
 
   Future<void> deletePrompt(String id) async {
@@ -259,4 +365,18 @@ class FirebaseService {
       await sendMassNotification(uids: chunk, title: title, message: message, coinReward: coinReward);
     }
   }
+}
+
+class BulkUploadResult {
+  final int total;
+  final int added;
+  final int skippedDuplicate;
+  final int flaggedForCleanup;
+
+  BulkUploadResult({
+    required this.total,
+    required this.added,
+    required this.skippedDuplicate,
+    required this.flaggedForCleanup,
+  });
 }

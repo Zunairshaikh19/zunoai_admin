@@ -18,8 +18,13 @@ class UserManagementScreen extends ConsumerWidget {
       appBar: AppBar(title: const Text("User Management")),
       body: usersAsync.when(
         data: (users) => SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: DataTable(
+          // DataTable never scrolls vertically on its own — with only the
+          // horizontal ScrollView below, a long user list simply overflows
+          // and can't be scrolled once it's taller than the screen.
+          scrollDirection: Axis.vertical,
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: DataTable(
             columns: const [
               DataColumn(label: Text("Email")),
               DataColumn(label: Text("Tier")),
@@ -67,6 +72,7 @@ class UserManagementScreen extends ConsumerWidget {
                 )),
               ],
             )).toList(),
+          ),
           ),
         ),
         loading: () => const Center(child: CircularProgressIndicator()),

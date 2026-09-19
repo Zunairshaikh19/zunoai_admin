@@ -14,6 +14,11 @@ final promptsStreamProvider = StreamProvider((ref) {
 });
 final selectedPromptsProvider = StateProvider<Set<String>>((ref) => {});
 
+/// 'all' | 'published' | 'draft' | 'cleanup' — draft/cleanup let an admin
+/// find what a bulk import left behind for review without scrolling the
+/// whole gallery.
+final promptFilterProvider = StateProvider<String>((ref) => 'all');
+
 class UploadProgress {
   final int current;
   final int total;
@@ -86,6 +91,17 @@ class PromptManagementScreen extends ConsumerWidget {
                 ),
                 const SizedBox(width: 8),
                 IconButton(
+                  icon: const Icon(Icons.visibility, color: Colors.lightGreenAccent),
+                  tooltip: "Publish Selected",
+                  onPressed: () => _handleBatchPublish(ref, selectedIds, true),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.visibility_off, color: Colors.white70),
+                  tooltip: "Unpublish Selected",
+                  onPressed: () => _handleBatchPublish(ref, selectedIds, false),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
                   icon: const Icon(Icons.delete_sweep, color: Colors.redAccent),
                   tooltip: "Delete Selected",
                   onPressed: () => _handleBatchDelete(context, ref, selectedIds),
@@ -117,16 +133,62 @@ class PromptManagementScreen extends ConsumerWidget {
       body: promptsAsync.when(
         data: (allPrompts) {
           final query = searchQuery.toLowerCase();
-          final filteredPrompts = allPrompts.where((p) => 
-            p.category.toLowerCase().contains(query) || 
-            p.hiddenPrompt.toLowerCase().contains(query)
-          ).toList();
+          final statusFilter = ref.watch(promptFilterProvider);
+          final filteredPrompts = allPrompts.where((p) {
+            final matchesSearch = p.category.toLowerCase().contains(query) ||
+                p.hiddenPrompt.toLowerCase().contains(query);
+            if (!matchesSearch) return false;
+            switch (statusFilter) {
+              case 'published':
+                return p.isPublished;
+              case 'draft':
+                return !p.isPublished;
+              case 'cleanup':
+                return p.needsCleanup;
+              default:
+                return true;
+            }
+          }).toList();
 
-          if (filteredPrompts.isEmpty) {
-            return const Center(child: Text("No prompts found matching your search."));
-          }
+          final draftCount = allPrompts.where((p) => !p.isPublished).length;
+          final cleanupCount = allPrompts.where((p) => p.needsCleanup).length;
 
-          return GridView.builder(
+          return Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                child: Wrap(
+                  spacing: 8,
+                  children: [
+                    ChoiceChip(
+                      label: const Text("All"),
+                      selected: statusFilter == 'all',
+                      onSelected: (_) => ref.read(promptFilterProvider.notifier).state = 'all',
+                    ),
+                    ChoiceChip(
+                      label: const Text("Published"),
+                      selected: statusFilter == 'published',
+                      onSelected: (_) => ref.read(promptFilterProvider.notifier).state = 'published',
+                    ),
+                    ChoiceChip(
+                      label: Text("Draft ($draftCount)"),
+                      selected: statusFilter == 'draft',
+                      selectedColor: Colors.orange.withValues(alpha: 0.3),
+                      onSelected: (_) => ref.read(promptFilterProvider.notifier).state = 'draft',
+                    ),
+                    ChoiceChip(
+                      label: Text("Needs Cleanup ($cleanupCount)"),
+                      selected: statusFilter == 'cleanup',
+                      selectedColor: Colors.redAccent.withValues(alpha: 0.3),
+                      onSelected: (_) => ref.read(promptFilterProvider.notifier).state = 'cleanup',
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: filteredPrompts.isEmpty
+                    ? const Center(child: Text("No prompts found matching your search."))
+                    : GridView.builder(
             padding: const EdgeInsets.all(16),
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 4,
@@ -170,6 +232,20 @@ class PromptManagementScreen extends ConsumerWidget {
                             children: [
                               Text(prompt.category, style: const TextStyle(fontWeight: FontWeight.bold)),
                               Text(prompt.isPremium ? "Premium" : "Free", style: TextStyle(color: prompt.isPremium ? Colors.amber : Colors.white54)),
+                              const SizedBox(height: 4),
+                              Wrap(
+                                spacing: 4,
+                                runSpacing: 4,
+                                children: [
+                                  _StatusPill(
+                                    label: prompt.isPublished ? "Published" : "Draft",
+                                    color: prompt.isPublished ? Colors.lightGreenAccent : Colors.orange,
+                                  ),
+                                  _StatusPill(label: prompt.gender, color: Colors.blueGrey.shade200),
+                                  if (prompt.needsCleanup)
+                                    const _StatusPill(label: "Needs Cleanup", color: Colors.redAccent),
+                                ],
+                              ),
                             ],
                           ),
                         ),
@@ -211,14 +287,34 @@ class PromptManagementScreen extends ConsumerWidget {
                           ),
                         ),
                       ),
+                      Positioned(
+                        bottom: 8,
+                        right: 8,
+                        child: CircleAvatar(
+                          backgroundColor: Colors.black54,
+                          radius: 18,
+                          child: IconButton(
+                            icon: Icon(
+                              prompt.isPublished ? Icons.visibility : Icons.visibility_off,
+                              color: prompt.isPublished ? Colors.lightGreenAccent : Colors.white70,
+                              size: 18,
+                            ),
+                            tooltip: prompt.isPublished ? "Unpublish" : "Publish",
+                            onPressed: () => ref.read(firebaseServiceProvider).updatePromptPublished(prompt.id, !prompt.isPublished),
+                          ),
+                        ),
+                      ),
                     ],
                   ],
                 ),
               ),
             );
-          },
-        );
-      },
+                        },
+                      ),
+              ),
+            ],
+          );
+        },
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (err, _) => Center(child: Text("Error: $err")),
     ),
@@ -307,6 +403,15 @@ class PromptManagementScreen extends ConsumerWidget {
     }
   }
 
+  void _handleBatchPublish(WidgetRef ref, Set<String> selectedIds, bool isPublished) async {
+    try {
+      await ref.read(firebaseServiceProvider).updateMultiplePromptsPublished(selectedIds.toList(), isPublished);
+      ref.read(selectedPromptsProvider.notifier).state = {};
+    } catch (e) {
+      debugPrint("Batch publish update failed: $e");
+    }
+  }
+
   void _handleBulkUpload(BuildContext context, WidgetRef ref) async {
     final result = await fp.FilePicker.pickFile(
       type: fp.FileType.custom,
@@ -332,7 +437,7 @@ class PromptManagementScreen extends ConsumerWidget {
           builder: (context) => const _BulkUploadProgressDialog(),
         );
 
-        await ref.read(firebaseServiceProvider).bulkUploadPrompts(
+        final uploadResult = await ref.read(firebaseServiceProvider).bulkUploadPrompts(
           jsonList.cast<Map<String, dynamic>>(),
           (count, total) {
             ref.read(uploadProgressProvider.notifier).state = UploadProgress(
@@ -346,13 +451,16 @@ class PromptManagementScreen extends ConsumerWidget {
         if (!context.mounted) return;
         final finalProgress = ref.read(uploadProgressProvider);
         Navigator.pop(context); // Close progress dialog
-        
+
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(finalProgress.isCancelled 
-                ? "Upload cancelled. ${finalProgress.current} items processed." 
-                : "Bulk upload completed: ${finalProgress.total} items processed"),
+            content: Text(
+              finalProgress.isCancelled
+                  ? "Upload cancelled. ${finalProgress.current} of ${finalProgress.total} processed — ${uploadResult.added} added as drafts, ${uploadResult.skippedDuplicate} skipped as duplicates."
+                  : "Done: ${uploadResult.added} added as drafts, ${uploadResult.skippedDuplicate} skipped as duplicates, ${uploadResult.flaggedForCleanup} flagged for cleanup. Review and publish them in the Draft filter.",
+            ),
             backgroundColor: finalProgress.isCancelled ? Colors.orange : Colors.green,
+            duration: const Duration(seconds: 6),
           ),
         );
       } catch (e) {
@@ -368,6 +476,7 @@ class PromptManagementScreen extends ConsumerWidget {
     final categoryController = TextEditingController();
     final promptController = TextEditingController();
     bool isPremium = false;
+    String gender = 'unisex';
     dynamic imageBytes;
 
     // Get existing categories for suggestions
@@ -458,6 +567,21 @@ class PromptManagementScreen extends ConsumerWidget {
                   maxLines: 4,
                 ),
                 const SizedBox(height: 16),
+                DropdownButtonFormField<String>(
+                  initialValue: gender,
+                  decoration: const InputDecoration(
+                    labelText: "Shows in gallery for",
+                    border: OutlineInputBorder(),
+                  ),
+                  items: const [
+                    DropdownMenuItem(value: 'unisex', child: Text("Everyone (unisex)")),
+                    DropdownMenuItem(value: 'male', child: Text("Male")),
+                    DropdownMenuItem(value: 'female', child: Text("Female")),
+                    DropdownMenuItem(value: 'couple', child: Text("Couple (2 photos)")),
+                  ],
+                  onChanged: (val) => setState(() => gender = val ?? 'unisex'),
+                ),
+                const SizedBox(height: 16),
                 SwitchListTile(
                   title: const Text("Premium Prompt"),
                   subtitle: const Text("Only visible to paid users"),
@@ -478,7 +602,7 @@ class PromptManagementScreen extends ConsumerWidget {
                   );
                   return;
                 }
-                
+
                 showDialog(
                   context: context,
                   barrierDismissible: false,
@@ -493,6 +617,8 @@ class PromptManagementScreen extends ConsumerWidget {
                     category: categoryController.text.trim(),
                     hiddenPrompt: promptController.text.trim(),
                     isPremium: isPremium,
+                    gender: gender,
+                    isPublished: true,
                   );
                   await ref.read(firebaseServiceProvider).addPrompt(newPrompt);
                   if (!context.mounted) return;
@@ -511,6 +637,29 @@ class PromptManagementScreen extends ConsumerWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _StatusPill({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withValues(alpha: 0.6)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.w600),
       ),
     );
   }
