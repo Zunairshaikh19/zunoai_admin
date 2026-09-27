@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:js_interop';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,7 +8,12 @@ import 'package:file_picker/file_picker.dart' as fp;
 import '../../../models/image_prompt.dart';
 import '../../users/presentation/user_management_screen.dart';
 
-final promptsStreamProvider = StreamProvider((ref) {
+/// Defined in web/index.html — fetches the image and writes it to the
+/// clipboard as PNG.
+@JS('zunoCopyImageToClipboard')
+external JSPromise<JSAny?> _copyImageToClipboard(JSString url);
+
+final promptsStreamProvider =StreamProvider((ref) {
   // Keep the data in memory even if the screen is not active
   ref.keepAlive();
   return ref.watch(firebaseServiceProvider).getPrompts();
@@ -373,6 +379,23 @@ class PromptManagementScreen extends ConsumerWidget {
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text("Close")),
+          ElevatedButton.icon(
+            onPressed: () async {
+              final messenger = ScaffoldMessenger.of(context);
+              try {
+                await _copyImageToClipboard(prompt.imageUrl.toJS).toDart;
+                messenger.showSnackBar(
+                  const SnackBar(content: Text("Image copied to clipboard")),
+                );
+              } catch (e) {
+                messenger.showSnackBar(
+                  SnackBar(content: Text("Image copy failed: $e")),
+                );
+              }
+            },
+            icon: const Icon(Icons.image, size: 16),
+            label: const Text("Copy Image"),
+          ),
           ElevatedButton.icon(
             onPressed: () {
               Clipboard.setData(ClipboardData(text: prompt.hiddenPrompt));
