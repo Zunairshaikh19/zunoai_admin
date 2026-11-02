@@ -26,7 +26,7 @@ class _CostCalculatorScreenState extends ConsumerState<CostCalculatorScreen> {
   // Subscription revenue is entered as "package price × what % of users pay
   // it" instead of a raw ARPU guess — easier to reason about than a dollar
   // figure with no visible math behind it.
-  final _subscriptionPriceController = TextEditingController(text: "4.99");
+  final _subscriptionPriceController = TextEditingController(text: "9.99");
   final _conversionPercentController = TextEditingController(text: "10");
 
   // Ad revenue is taxed/cut differently: Play Store takes a cut of
@@ -52,10 +52,24 @@ class _CostCalculatorScreenState extends ConsumerState<CostCalculatorScreen> {
     _loadGenerationCost();
   }
 
+  // Live economy values, so the 80% margin check below uses today's settings.
+  int _premiumDailyCoins = 52;
+  String? _liveModelId;
+
   Future<void> _loadGenerationCost() async {
     final doc = await FirebaseFirestore.instance.collection('settings').doc('economy').get();
     if (doc.exists && mounted) {
-      setState(() => _coinsPerGenController.text = "${doc.data()?['generationCost'] ?? 40}");
+      setState(() {
+        _coinsPerGenController.text = "${doc.data()?['generationCost'] ?? 40}";
+        _premiumDailyCoins = (doc.data()?['dailyBonusPremium'] as num?)?.toInt() ?? 52;
+      });
+    }
+    // Start on the model the live app really uses, not just the first in the list.
+    final cfg = await FirebaseFirestore.instance.collection('settings').doc('config').get();
+    _liveModelId = cfg.data()?['generationModel'] as String?;
+    if (mounted && _liveModelId != null) {
+      final match = _models.where((m) => m.id == _liveModelId);
+      if (match.isNotEmpty) _applyModel(match.first);
     }
   }
 
@@ -70,7 +84,8 @@ class _CostCalculatorScreenState extends ConsumerState<CostCalculatorScreen> {
         _models = models;
         _isLoadingModels = false;
         if (_selectedModelId == null && models.isNotEmpty) {
-          _applyModel(models.first);
+          final live = models.where((m) => m.id == _liveModelId);
+          _applyModel(live.isNotEmpty ? live.first : models.first);
         }
       });
     } catch (e) {
@@ -154,6 +169,43 @@ class _CostCalculatorScreenState extends ConsumerState<CostCalculatorScreen> {
             ),
             _statRow("Profit per user / year",
                 "${_usd(yearlyProfitPerUser, decimals: 3)}  (${_pkr(yearlyProfitPerUser, usdToPkr, decimals: 2)})"),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Worst case for ONE paying monthly user: they spend every daily premium coin.
+  // Margin = (price after store fee − AI cost of those images) / price after fee.
+  // The target is 80%, shown green when met and red when not.
+  Widget _buildMarginCheck() {
+    final price = _num(_subscriptionPriceController);
+    final feePct = _num(_storeFeeController);
+    final costPerImage = _num(_costPerImageController);
+    final coinsPerGen = _num(_coinsPerGenController);
+    final netPrice = price * (1 - feePct / 100);
+    final maxImages = coinsPerGen > 0 ? (_premiumDailyCoins * 30) / coinsPerGen : 0.0;
+    final aiCost = maxImages * costPerImage;
+    final margin = netPrice > 0 ? (netPrice - aiCost) / netPrice * 100 : 0.0;
+    final ok = margin >= 80;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text("80% margin check (monthly premium, worst case)",
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            _statRow("Premium daily coins × 30 ÷ coins per image", "$_premiumDailyCoins × 30 ÷ ${coinsPerGen.toStringAsFixed(0)} = ${maxImages.toStringAsFixed(1)} images/month"),
+            _statRow("AI cost if all used", "\$${aiCost.toStringAsFixed(2)}"),
+            _statRow("Price after store fee", "\$${netPrice.toStringAsFixed(2)}"),
+            _statRow(
+              ok ? "Margin: OK (target 80%)" : "Margin: BELOW 80% — lower daily coins or raise price",
+              "${margin.toStringAsFixed(1)}%",
+              color: ok ? Colors.green : Colors.redAccent,
+              bold: true,
+            ),
           ],
         ),
       ),
@@ -264,6 +316,8 @@ class _CostCalculatorScreenState extends ConsumerState<CostCalculatorScreen> {
                 padding: const EdgeInsets.only(top: 8),
                 child: Text(_modelsError!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
               ),
+            const SizedBox(height: 24),
+            _buildMarginCheck(),
             const SizedBox(height: 40),
             const Text("Assumptions", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const Text(

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -10,11 +11,6 @@ import '../models/support_message.dart';
 class FirebaseService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
-
-  // ImgBB API Key — pass at build time with:
-  //   flutter build web --dart-define=IMGBB_API_KEY=your_key
-  // (rotate the old key on imgbb.com since it was previously committed to source control)
-  static const String _imgBBKey = String.fromEnvironment('IMGBB_API_KEY');
 
   // --- Auth ---
   Future<UserCredential> adminLogin(String email, String password) async {
@@ -78,8 +74,17 @@ class FirebaseService {
   }
 
   // --- Prompts ---
+  // The secret prompt text lives in `promptSecrets/{id}` (admin/server-only per
+  // firestore.rules). The public `prompts/{id}` doc must never hold it, because
+  // anyone — guests included — can read `prompts`.
   Future<void> addPrompt(ImagePrompt prompt) async {
-    await _firestore.collection('prompts').add(prompt.toMap());
+    final ref = _firestore.collection('prompts').doc();
+    final batch = _firestore.batch();
+    batch.set(ref, prompt.toMap()); // public fields only
+    batch.set(_firestore.collection('promptSecrets').doc(ref.id), {
+      'hiddenPrompt': prompt.hiddenPrompt,
+    });
+    await batch.commit();
   }
 
   // Midjourney-style parameters that mean nothing to the Gemini model we
@@ -107,9 +112,9 @@ class FirebaseService {
   static bool textNeedsCleanup(String text) => _midjourneyFlagPattern.hasMatch(text);
 
   // Supabase edge function that downloads an image server-side and re-hosts
-  // it on ImgBB — see supabase/functions/mirror-image in the main app repo.
-  // Same Supabase project as the app's generate-image function, so it shares
-  // its IMGBB_API_KEY / FIREBASE_SERVICE_ACCOUNT_KEY secrets already.
+  // it on our Cloudflare R2 bucket — see supabase/functions/mirror-image in the
+  // main app repo. Same Supabase project as the app's generate-image function,
+  // so it shares its R2_* / FIREBASE_SERVICE_ACCOUNT_KEY secrets already.
   static const String _mirrorImageUrl = "https://ylenfbneddyuzrkckaul.supabase.co/functions/v1/mirror-image";
 
   Future<String> _mirrorImageServerSide(String imageUrl) async {
@@ -139,6 +144,53 @@ class FirebaseService {
     throw data['error'] ?? "Mirror function failed (HTTP ${res.statusCode})";
   }
 
+  /// Everything needed to rebuild the prompts: the public `prompts` docs and the
+  /// `promptSecrets` docs, as one JSON string. Used for the backup the admin
+  /// downloads BEFORE running [migratePromptSecrets] (which deletes the legacy
+  /// public copy of the secret text).
+  Future<String> exportPromptsBackupJson() async {
+    final prompts = await _firestore.collection('prompts').get();
+    final secrets = await _firestore.collection('promptSecrets').get();
+    final data = {
+      'exportedAt': DateTime.now().toIso8601String(),
+      'prompts': {for (final d in prompts.docs) d.id: d.data()},
+      'promptSecrets': {for (final d in secrets.docs) d.id: d.data()},
+    };
+    return const JsonEncoder.withIndent('  ').convert(
+      jsonDecode(jsonEncode(data, toEncodable: (o) => o.toString())),
+    );
+  }
+
+  static const String _splitPromptsUrl = "https://ylenfbneddyuzrkckaul.supabase.co/functions/v1/split-prompts";
+
+  /// Runs the `split-prompts` edge function: moves every prompt's secret text
+  /// into `promptSecrets` and removes it from the public `prompts` doc.
+  /// Safe to run again. Returns "migrated, skipped" counts.
+  Future<({int migrated, int skipped})> migratePromptSecrets() async {
+    final user = _auth.currentUser;
+    if (user == null) throw "Not authenticated";
+    final idToken = await user.getIdToken();
+
+    final res = await http.post(
+      Uri.parse(_splitPromptsUrl),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $idToken',
+      },
+    );
+
+    Map<String, dynamic> data;
+    try {
+      data = jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (_) {
+      throw "split-prompts returned an unexpected response (HTTP ${res.statusCode})";
+    }
+    if (res.statusCode == 200 && data['success'] == true) {
+      return (migrated: (data['migrated'] as num).toInt(), skipped: (data['skipped'] as num).toInt());
+    }
+    throw data['error'] ?? "split-prompts failed (HTTP ${res.statusCode})";
+  }
+
   /// Bulk-imports prompts from a JSON list, skipping anything whose
   /// `hiddenPrompt` text already exists (either already live in Firestore, or
   /// earlier in this same batch) so re-running an import — or importing an
@@ -163,8 +215,14 @@ class FirebaseService {
     // at all), so the only reliable dedup key across old and new data is the
     // hiddenPrompt text itself.
     final existingSnapshot = await _firestore.collection('prompts').get();
+    final secretsSnapshot = await _firestore.collection('promptSecrets').get();
     final seenHiddenPrompts = <String>{
+      // Legacy copies still sitting in the public `prompts` docs...
       for (final doc in existingSnapshot.docs)
+        if ((doc.data()['hiddenPrompt'] as String? ?? '').trim().isNotEmpty)
+          (doc.data()['hiddenPrompt'] as String).trim(),
+      // ...and the real (migrated / new) ones in `promptSecrets`.
+      for (final doc in secretsSnapshot.docs)
         if ((doc.data()['hiddenPrompt'] as String? ?? '').trim().isNotEmpty)
           (doc.data()['hiddenPrompt'] as String).trim(),
     };
@@ -189,7 +247,7 @@ class FirebaseService {
 
         String imageUrl = data['imageUrl'] ?? '';
 
-        // Mirror external images to ImgBB via a server-side Supabase function
+        // Mirror external images to R2 via a server-side Supabase function
         // instead of downloading them in-browser: Flutter Web can't read the
         // bytes of an image from a host that doesn't send CORS headers (most
         // buckets don't — they're built for <img> tags, not fetch()), so a
@@ -197,7 +255,7 @@ class FirebaseService {
         // server-side function has no such restriction. If it still fails for
         // some other reason (source genuinely offline, etc.), fall back to
         // the original URL rather than losing the whole prompt.
-        if (imageUrl.isNotEmpty && imageUrl.startsWith('http') && !imageUrl.contains('imgbb.com')) {
+        if (imageUrl.isNotEmpty && imageUrl.startsWith('http')) {
           try {
             imageUrl = await _mirrorImageServerSide(imageUrl);
           } catch (e) {
@@ -269,14 +327,22 @@ class FirebaseService {
     required String gender,
     required bool isPremium,
   }) async {
-    await _firestore.collection('prompts').doc(id).update({
+    final batch = _firestore.batch();
+    batch.update(_firestore.collection('prompts').doc(id), {
       'imageUrl': imageUrl,
       'category': category,
-      'hiddenPrompt': hiddenPrompt,
       'gender': gender,
       'isPremium': isPremium,
       'needsCleanup': textNeedsCleanup(hiddenPrompt),
+      // Scrub any legacy public copy of the secret text for this prompt.
+      'hiddenPrompt': FieldValue.delete(),
     });
+    batch.set(
+      _firestore.collection('promptSecrets').doc(id),
+      {'hiddenPrompt': hiddenPrompt},
+      SetOptions(merge: true),
+    );
+    await batch.commit();
   }
 
   Future<void> updateMultiplePromptsPublished(List<String> ids, bool isPublished) async {
@@ -292,13 +358,17 @@ class FirebaseService {
   }
 
   Future<void> deletePrompt(String id) async {
-    await _firestore.collection('prompts').doc(id).delete();
+    final batch = _firestore.batch();
+    batch.delete(_firestore.collection('prompts').doc(id));
+    batch.delete(_firestore.collection('promptSecrets').doc(id));
+    await batch.commit();
   }
 
   Future<void> deleteMultiplePrompts(List<String> ids) async {
     final batch = _firestore.batch();
     for (var id in ids) {
       batch.delete(_firestore.collection('prompts').doc(id));
+      batch.delete(_firestore.collection('promptSecrets').doc(id));
     }
     await batch.commit();
   }
@@ -315,26 +385,216 @@ class FirebaseService {
     await batch.commit();
   }
 
+  /// Public prompt docs merged with their secret text from `promptSecrets`.
+  /// A prompt not migrated yet still falls back to its legacy `hiddenPrompt`
+  /// field, so the admin list keeps working before and after running the
+  /// `split-prompts` migration.
   Stream<List<ImagePrompt>> getPrompts() {
-    return _firestore.collection('prompts').snapshots().map((snapshot) =>
-        snapshot.docs.map((doc) => ImagePrompt.fromMap(doc.data(), doc.id)).toList());
+    late final StreamController<List<ImagePrompt>> controller;
+    StreamSubscription? promptsSub;
+    StreamSubscription? secretsSub;
+    QuerySnapshot<Map<String, dynamic>>? latestPrompts;
+    QuerySnapshot<Map<String, dynamic>>? latestSecrets;
+
+    void emit() {
+      final prompts = latestPrompts;
+      final secrets = latestSecrets;
+      if (prompts == null || secrets == null) return;
+      final secretText = <String, String>{
+        for (final d in secrets.docs) d.id: (d.data()['hiddenPrompt'] as String? ?? ''),
+      };
+      controller.add(prompts.docs.map((doc) {
+        final data = Map<String, dynamic>.from(doc.data());
+        final secret = secretText[doc.id];
+        if (secret != null && secret.isNotEmpty) data['hiddenPrompt'] = secret;
+        return ImagePrompt.fromMap(data, doc.id);
+      }).toList());
+    }
+
+    controller = StreamController<List<ImagePrompt>>(
+      onListen: () {
+        promptsSub = _firestore.collection('prompts').snapshots().listen(
+          (s) {
+            latestPrompts = s;
+            emit();
+          },
+          onError: controller.addError,
+        );
+        secretsSub = _firestore.collection('promptSecrets').snapshots().listen(
+          (s) {
+            latestSecrets = s;
+            emit();
+          },
+          onError: controller.addError,
+        );
+      },
+      onCancel: () async {
+        await promptsSub?.cancel();
+        await secretsSub?.cancel();
+      },
+    );
+    return controller.stream;
   }
 
-  Future<String> uploadImageWeb(Uint8List bytes) async {
-    final request = http.MultipartRequest(
-      'POST',
-      Uri.parse('https://api.imgbb.com/1/upload?key=$_imgBBKey'),
-    );
-    request.files.add(http.MultipartFile.fromBytes('image', bytes, filename: 'prompt.jpg'));
+  static const String _uploadImageUrl = "https://ylenfbneddyuzrkckaul.supabase.co/functions/v1/upload-image";
 
-    final response = await request.send();
-    if (response.statusCode == 200) {
-      final resData = await response.stream.bytesToString();
-      final json = jsonDecode(resData);
-      return json['data']['url'];
-    } else {
-      throw "Upload failed";
+  /// Uploads a template image through the `upload-image` edge function
+  /// (admin purpose: bigger size limit) which stores it on Cloudflare R2.
+  /// No storage key lives in the admin build any more.
+  Future<String> uploadImageWeb(Uint8List bytes) async {
+    final user = _auth.currentUser;
+    if (user == null) throw "Not authenticated";
+    final idToken = await user.getIdToken();
+
+    final res = await http.post(
+      Uri.parse(_uploadImageUrl),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $idToken',
+      },
+      body: jsonEncode({'imageBase64': base64Encode(bytes), 'purpose': 'prompt'}),
+    );
+
+    Map<String, dynamic> data;
+    try {
+      data = jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (_) {
+      throw "Upload returned an unexpected response (HTTP ${res.statusCode})";
     }
+    if (res.statusCode == 200 && data['success'] == true) {
+      return data['url'] as String;
+    }
+    throw data['error'] ?? "Upload failed (HTTP ${res.statusCode})";
+  }
+
+  static const String _migrateImagesUrl = "https://ylenfbneddyuzrkckaul.supabase.co/functions/v1/migrate-prompt-images";
+
+  /// Moves every prompt's template image from ImgBB to R2 by calling the
+  /// `migrate-prompt-images` function page by page until it is done. Safe to
+  /// run again: images already on R2 are skipped. Prompts whose old image can
+  /// no longer be fetched are flagged `needsCleanup`.
+  Future<({int migrated, int skipped, int failed})> migratePromptImages({
+    void Function(int migrated, int skipped, int failed)? onProgress,
+  }) async {
+    final user = _auth.currentUser;
+    if (user == null) throw "Not authenticated";
+
+    var migrated = 0, skipped = 0, failed = 0;
+    String? pageToken;
+    do {
+      final idToken = await user.getIdToken();
+      Map<String, dynamic>? data;
+      Object? lastError;
+      // One retry per page for transient network / cold-start errors.
+      for (var attempt = 0; attempt < 2 && data == null; attempt++) {
+        try {
+          final res = await http.post(
+            Uri.parse(_migrateImagesUrl),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $idToken',
+            },
+            body: jsonEncode({if (pageToken != null) 'pageToken': pageToken}),
+          );
+          final parsed = jsonDecode(res.body) as Map<String, dynamic>;
+          if (res.statusCode == 200 && parsed['success'] == true) {
+            data = parsed;
+          } else {
+            lastError = parsed['error'] ?? "HTTP ${res.statusCode}";
+          }
+        } catch (e) {
+          lastError = e;
+        }
+      }
+      if (data == null) throw "Image migration rukk gayi: $lastError (jo ho chuki woh save hai, dobara chalao)";
+
+      migrated += (data['migrated'] as num).toInt();
+      skipped += (data['skipped'] as num).toInt();
+      failed += (data['failed'] as num).toInt();
+      onProgress?.call(migrated, skipped, failed);
+      pageToken = data['nextPageToken'] as String?;
+    } while (pageToken != null);
+
+    return (migrated: migrated, skipped: skipped, failed: failed);
+  }
+
+  // Our own R2 public base. A prompt whose imageUrl starts with this is done.
+  // (If the R2 custom domain is added later, add the new base here too.)
+  static const List<String> _ownImageBases = [
+    "https://pub-4eca0f1f940e48efb441f5b810103262.r2.dev/",
+  ];
+
+  static bool _isOwnImage(String url) => _ownImageBases.any(url.startsWith);
+
+  /// Repairs template images using the original import JSON
+  /// (`all_prompts_database.json`). For every prompt whose image is not on our
+  /// R2 yet, finds the JSON entry with the same hidden prompt text and copies
+  /// that entry's original image to R2 (server-side, via mirror-image).
+  /// Only `imageUrl` / `legacyImageUrl` change; publish/premium/gender etc. are
+  /// untouched. Cost: one read per prompt + one per secret, one write per fix.
+  Future<({int fixed, int alreadyOk, int noMatch, int failed})> repairImagesFromJson(
+    List<Map<String, dynamic>> jsonList, {
+    void Function(int fixed, int alreadyOk, int noMatch, int failed, int total)? onProgress,
+    bool Function()? shouldCancel,
+  }) async {
+    final sourceByText = <String, String>{};
+    for (final e in jsonList) {
+      final text = (e['hiddenPrompt'] ?? '').toString().trim();
+      final url = (e['imageUrl'] ?? '').toString();
+      if (text.isNotEmpty && url.startsWith('http')) sourceByText.putIfAbsent(text, () => url);
+    }
+
+    final prompts = await _firestore.collection('prompts').get();
+    final secrets = await _firestore.collection('promptSecrets').get();
+    final hiddenById = {
+      for (final d in secrets.docs) d.id: (d.data()['hiddenPrompt'] ?? '').toString().trim(),
+    };
+
+    var fixed = 0, alreadyOk = 0, noMatch = 0, failed = 0;
+    final total = prompts.docs.length;
+    final todo = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+    for (final d in prompts.docs) {
+      final url = (d.data()['imageUrl'] ?? '').toString();
+      if (_isOwnImage(url)) {
+        alreadyOk++;
+      } else {
+        todo.add(d);
+      }
+    }
+    onProgress?.call(fixed, alreadyOk, noMatch, failed, total);
+
+    var next = 0;
+    Future<void> worker() async {
+      while (true) {
+        if (shouldCancel != null && shouldCancel()) return;
+        if (next >= todo.length) return;
+        final d = todo[next++];
+        final hidden = hiddenById[d.id] ?? '';
+        final source = sourceByText[hidden];
+        if (source == null) {
+          noMatch++;
+        } else {
+          try {
+            final newUrl = await _mirrorImageServerSide(source);
+            final old = (d.data()['imageUrl'] ?? '').toString();
+            await _firestore.collection('prompts').doc(d.id).update({
+              'imageUrl': newUrl,
+              if (old.isNotEmpty) 'legacyImageUrl': old,
+              // Earlier failed migration runs wrongly set this; recompute from the text.
+              'needsCleanup': textNeedsCleanup(hidden),
+            });
+            fixed++;
+          } catch (e) {
+            debugPrint("Repair failed for ${d.id}: $e");
+            failed++;
+          }
+        }
+        onProgress?.call(fixed, alreadyOk, noMatch, failed, total);
+      }
+    }
+
+    await Future.wait(List.generate(4, (_) => worker()));
+    return (fixed: fixed, alreadyOk: alreadyOk, noMatch: noMatch, failed: failed);
   }
 
   // --- Support ---

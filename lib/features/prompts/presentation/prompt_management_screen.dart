@@ -912,7 +912,7 @@ class _BulkUploadProgressDialog extends ConsumerWidget {
           Text("Uploading ${progress.current} of ${progress.total}..."),
           const SizedBox(height: 8),
           const Text(
-            "Downloading images, uploading to ImgBB & saving to Firestore. Please wait...",
+            "Downloading images, uploading to R2 & saving to Firestore. Please wait...",
             style: TextStyle(fontSize: 12, color: Colors.white54),
           ),
         ],

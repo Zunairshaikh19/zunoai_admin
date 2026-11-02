@@ -55,7 +55,13 @@ class StatsDashboardScreen extends ConsumerWidget {
             usersAsync.when(
               data: (users) {
                 final paid = users.where((u) => u.tier == UserTier.paid).length;
-                final mrr = paid * 4.99;
+                // Real prices ($9.99/month, $79.99/year), after Google Play's 15% fee.
+                // Only users with a real purchase (premiumPlan set) count — premium
+                // granted by hand from the Users screen earns nothing.
+                const monthlyPrice = 9.99, yearlyPrice = 79.99, storeFee = 0.15;
+                final monthlyUsers = users.where((u) => u.tier == UserTier.paid && u.premiumPlan == 'monthly').length;
+                final yearlyUsers = users.where((u) => u.tier == UserTier.paid && u.premiumPlan == 'yearly').length;
+                final mrr = (monthlyUsers * monthlyPrice + yearlyUsers * yearlyPrice / 12) * (1 - storeFee);
                 final totalCoins = users.fold<int>(0, (sum, u) => sum + u.coins);
                 final activeToday = users.where((u) {
                   final last = u.lastActivity;
@@ -66,7 +72,7 @@ class StatsDashboardScreen extends ConsumerWidget {
 
                 return Row(
                   children: [
-                    _StatCard("Est. MRR", "\$${mrr.toStringAsFixed(2)}", Icons.attach_money, Colors.green),
+                    _StatCard("Est. MRR (net of 15% fee)","\$${mrr.toStringAsFixed(2)}", Icons.attach_money, Colors.green),
                     const SizedBox(width: 16),
                     _StatCard("Active Today", "$activeToday", Icons.bolt, Colors.cyan),
                     const SizedBox(width: 16),

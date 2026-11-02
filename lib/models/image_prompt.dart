@@ -44,11 +44,13 @@ class ImagePrompt {
     );
   }
 
+  /// Public fields only. `hiddenPrompt` is deliberately NOT included: the
+  /// `prompts` collection is world-readable, so the secret text is written
+  /// separately to `promptSecrets/{id}` (see FirebaseService.addPrompt).
   Map<String, dynamic> toMap() {
     return {
       'imageUrl': imageUrl,
       'category': category,
-      'hiddenPrompt': hiddenPrompt,
       'isPremium': isPremium,
       'gender': gender,
       'isPublished': isPublished,

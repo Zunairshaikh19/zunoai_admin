@@ -45,6 +45,18 @@
     // Copies an image URL to the clipboard as PNG (the only image type
     // browsers reliably accept). The blob promise is handed to ClipboardItem
     // synchronously so Safari keeps the user-gesture permission.
+    // Saves text as a file download (used for the prompts backup JSON).
+    window.zunoDownloadText = function (filename, text) {
+      const blob = new Blob([text], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    };
+
     window.zunoCopyImageToClipboard = function (url) {
       if (!navigator.clipboard || !window.ClipboardItem) {
         return Promise.reject(new Error('Image copy is not supported in this browser'));

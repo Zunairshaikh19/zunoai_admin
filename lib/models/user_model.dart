@@ -10,6 +10,11 @@ class UserModel {
   final int coins;
   final UserTier tier;
   final DateTime? premiumExpiresAt;
+
+  /// 'monthly' | 'yearly' when set by a real Play purchase (confirm-purchase).
+  /// Null for free users and for premium granted manually from this panel —
+  /// manual grants earn no revenue, so MRR ignores them.
+  final String? premiumPlan;
   final String referralCode;
   final int referralCount;
   final bool isBlocked;
@@ -24,6 +29,7 @@ class UserModel {
     required this.coins,
     required this.tier,
     this.premiumExpiresAt,
+    this.premiumPlan,
     required this.referralCode,
     required this.referralCount,
     required this.isBlocked,
@@ -40,6 +46,7 @@ class UserModel {
       coins: data['coins'] ?? 0,
       tier: data['tier'] == 'paid' ? UserTier.paid : UserTier.free,
       premiumExpiresAt: (data['premiumExpiresAt'] as Timestamp?)?.toDate(),
+      premiumPlan: data['premiumPlan'] as String?,
       referralCode: data['referralCode'] ?? '',
       referralCount: data['referralCount'] ?? 0,
       isBlocked: data['isBlocked'] ?? false,
