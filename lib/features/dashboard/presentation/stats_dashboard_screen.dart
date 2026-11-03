@@ -10,7 +10,7 @@ class StatsDashboardScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final usersAsync = ref.watch(usersStreamProvider);
-    final promptsAsync = ref.watch(promptsStreamProvider);
+    final promptsAsync = ref.watch(promptCountsProvider);
 
     return Scaffold(
       appBar: AppBar(title: const Text("Admin Dashboard")),
@@ -89,9 +89,9 @@ class StatsDashboardScreen extends ConsumerWidget {
             promptsAsync.when(
               data: (prompts) => Row(
                 children: [
-                  _StatCard("Total Prompts", "${prompts.length}", Icons.art_track, Colors.purpleAccent),
+                  _StatCard("Total Prompts", "${prompts.total}", Icons.art_track, Colors.purpleAccent),
                   const SizedBox(width: 16),
-                  _StatCard("Premium Prompts", "${prompts.where((p) => p.isPremium).length}", Icons.auto_awesome, Colors.amberAccent),
+                  _StatCard("Premium Prompts", "${prompts.premium}", Icons.auto_awesome, Colors.amberAccent),
                 ],
               ),
               loading: () => const Center(child: CircularProgressIndicator()),

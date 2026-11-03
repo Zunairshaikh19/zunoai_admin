@@ -1,4 +1,6 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:web/web.dart' as web;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import '../../../models/support_message.dart';
@@ -266,8 +268,14 @@ class _ChatArea extends ConsumerWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         if (msg.attachmentUrl != null)
-                          Image.network(msg.attachmentUrl!, height: 200),
-                        Text(msg.text),
+                          MouseRegion(
+                            cursor: SystemMouseCursors.click,
+                            child: GestureDetector(
+                              onTap: () => _openUrl(msg.attachmentUrl!),
+                              child: Image.network(msg.attachmentUrl!, height: 200),
+                            ),
+                          ),
+                        _LinkText(msg.text),
                         Text(
                           DateFormat.jm().format(msg.timestamp),
                           style: const TextStyle(fontSize: 10, color: Colors.white38),
@@ -319,3 +327,56 @@ class _ChatArea extends ConsumerWidget {
 final messagesStreamProvider = StreamProvider.family<List<SupportMessage>, String>((ref, ticketId) {
   return ref.watch(firebaseServiceProvider).getMessages(ticketId);
 });
+
+
+void _openUrl(String url) {
+  // Called straight from the click handler so the browser allows the new tab.
+  web.window.open(url, '_blank');
+}
+
+/// Text where any http(s) link is underlined and opens in a new tab on click.
+class _LinkText extends StatefulWidget {
+  final String text;
+  const _LinkText(this.text);
+
+  @override
+  State<_LinkText> createState() => _LinkTextState();
+}
+
+class _LinkTextState extends State<_LinkText> {
+  static final _urlPattern = RegExp(r'https?://[^\s]+');
+  final List<TapGestureRecognizer> _recognizers = [];
+
+  @override
+  void dispose() {
+    for (final r in _recognizers) {
+      r.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    for (final r in _recognizers) {
+      r.dispose();
+    }
+    _recognizers.clear();
+
+    final spans = <InlineSpan>[];
+    var last = 0;
+    for (final m in _urlPattern.allMatches(widget.text)) {
+      if (m.start > last) spans.add(TextSpan(text: widget.text.substring(last, m.start)));
+      final url = m.group(0)!;
+      final recognizer = TapGestureRecognizer()..onTap = () => _openUrl(url);
+      _recognizers.add(recognizer);
+      spans.add(TextSpan(
+        text: url,
+        style: const TextStyle(color: Colors.lightBlueAccent, decoration: TextDecoration.underline),
+        recognizer: recognizer,
+      ));
+      last = m.end;
+    }
+    if (last < widget.text.length) spans.add(TextSpan(text: widget.text.substring(last)));
+    return Text.rich(TextSpan(children: spans));
+  }
+}

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:js_interop';
 import 'package:flutter/material.dart';
@@ -5,7 +6,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker_web/image_picker_web.dart';
 import 'package:file_picker/file_picker.dart' as fp;
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../models/image_prompt.dart';
+import '../../../services/firebase_service.dart';
 import '../../users/presentation/user_management_screen.dart';
 
 /// Defined in web/index.html — fetches the image and writes it to the
@@ -13,11 +16,96 @@ import '../../users/presentation/user_management_screen.dart';
 @JS('zunoCopyImageToClipboard')
 external JSPromise<JSAny?> _copyImageToClipboard(JSString url);
 
-final promptsStreamProvider =StreamProvider((ref) {
-  // Keep the data in memory even if the screen is not active
-  ref.keepAlive();
-  return ref.watch(firebaseServiceProvider).getPrompts();
+/// Prompts, one page (60) at a time. Each loaded page keeps a live listener, so
+/// edits show up without re-reading everything. Changing the status filter
+/// rebuilds the list; `ref.invalidate(promptsStreamProvider)` reloads it.
+final promptsStreamProvider =
+    StateNotifierProvider<PromptsPager, AsyncValue<List<ImagePrompt>>>((ref) {
+  final filter = ref.watch(promptFilterProvider);
+  return PromptsPager(ref.watch(firebaseServiceProvider), filter);
 });
+
+/// Totals for the filter chips and the dashboard (count() aggregation, so it
+/// costs a handful of reads instead of one per prompt).
+final promptCountsProvider = FutureProvider<PromptCounts>((ref) {
+  return ref.watch(firebaseServiceProvider).promptCounts();
+});
+
+class _PromptPage {
+  List<QueryDocumentSnapshot<Map<String, dynamic>>>? docs;
+  Map<String, String>? secrets;
+  StreamSubscription? promptsSub;
+  StreamSubscription? secretsSub;
+}
+
+class PromptsPager extends StateNotifier<AsyncValue<List<ImagePrompt>>> {
+  PromptsPager(this._service, this._filter) : super(const AsyncValue.loading()) {
+    _loadNextPage();
+  }
+
+  final FirebaseService _service;
+  final String _filter;
+  final List<_PromptPage> _pages = [];
+  bool hasMore = true;
+  bool _loading = false;
+
+  void loadMore() {
+    if (hasMore && !_loading) _loadNextPage();
+  }
+
+  void _loadNextPage() {
+    if (_loading) return;
+    _loading = true;
+    final after = _pages.isEmpty ? null : _pages.last.docs?.last;
+    final page = _PromptPage();
+    _pages.add(page);
+    page.promptsSub = _service.promptsPageQuery(_filter, after: after).snapshots().listen((snap) {
+      page.docs = snap.docs;
+      if (page.secretsSub == null && snap.docs.isNotEmpty) {
+        page.secretsSub =
+            _service.promptSecretsRangeQuery(snap.docs.first.id, snap.docs.last.id).snapshots().listen((s) {
+          page.secrets = {for (final d in s.docs) d.id: (d.data()['hiddenPrompt'] as String? ?? '')};
+          _emit();
+        }, onError: _onError);
+      }
+      if (identical(page, _pages.last)) hasMore = snap.docs.length >= FirebaseService.promptPageSize;
+      _loading = false;
+      _emit();
+    }, onError: _onError);
+  }
+
+  void _onError(Object e, StackTrace st) {
+    _loading = false;
+    if (mounted) state = AsyncValue.error(e, st);
+  }
+
+  void _emit() {
+    if (!mounted) return;
+    final list = <ImagePrompt>[];
+    for (final p in _pages) {
+      final docs = p.docs;
+      if (docs == null) return;
+      if (docs.isNotEmpty && p.secrets == null) return;
+      for (final doc in docs) {
+        final data = Map<String, dynamic>.from(doc.data());
+        final secret = p.secrets?[doc.id];
+        if (secret != null && secret.isNotEmpty) data['hiddenPrompt'] = secret;
+        list.add(ImagePrompt.fromMap(data, doc.id));
+      }
+    }
+    state = AsyncValue.data(list);
+  }
+
+  @override
+  void dispose() {
+    for (final p in _pages) {
+      p.promptsSub?.cancel();
+      p.secretsSub?.cancel();
+    }
+    super.dispose();
+  }
+}
+
 final selectedPromptsProvider = StateProvider<Set<String>>((ref) => {});
 
 /// 'all' | 'published' | 'draft' | 'cleanup' — draft/cleanup let an admin
@@ -116,7 +204,10 @@ class PromptManagementScreen extends ConsumerWidget {
               ]
             : [
                 IconButton(
-                  onPressed: () => ref.invalidate(promptsStreamProvider),
+                  onPressed: () {
+                    ref.invalidate(promptsStreamProvider);
+                    ref.invalidate(promptCountsProvider);
+                  },
                   icon: const Icon(Icons.refresh),
                   tooltip: "Refresh from Firebase",
                 ),
@@ -156,8 +247,10 @@ class PromptManagementScreen extends ConsumerWidget {
             }
           }).toList();
 
-          final draftCount = allPrompts.where((p) => !p.isPublished).length;
-          final cleanupCount = allPrompts.where((p) => p.needsCleanup).length;
+          final counts = ref.watch(promptCountsProvider).valueOrNull;
+          final draftCount = counts?.draft ?? '...';
+          final cleanupCount = counts?.cleanup ?? '...';
+          final hasMore = ref.read(promptsStreamProvider.notifier).hasMore;
 
           return Column(
             children: [
@@ -355,6 +448,17 @@ class PromptManagementScreen extends ConsumerWidget {
                         },
                       ),
               ),
+              if (hasMore)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: OutlinedButton.icon(
+                    onPressed: () => ref.read(promptsStreamProvider.notifier).loadMore(),
+                    icon: const Icon(Icons.expand_more),
+                    label: Text(searchQuery.isEmpty
+                        ? "Load more (${allPrompts.length} loaded)"
+                        : "Load more - search covers only the ${allPrompts.length} loaded"),
+                  ),
+                ),
             ],
           );
         },

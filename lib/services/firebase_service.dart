@@ -436,6 +436,57 @@ class FirebaseService {
     return controller.stream;
   }
 
+  // --- Paged prompt reads (admin list) ---
+  // The list used to stream the WHOLE prompts + promptSecrets collections
+  // (~3,200 reads every time the page or dashboard opened). Now it reads one
+  // page at a time, ordered by document id so no composite index is needed.
+  static const int promptPageSize = 60;
+
+  Query<Map<String, dynamic>> promptsPageQuery(String filter, {DocumentSnapshot? after}) {
+    Query<Map<String, dynamic>> q = _firestore.collection('prompts');
+    switch (filter) {
+      case 'published':
+        q = q.where('isPublished', isEqualTo: true);
+        break;
+      case 'draft':
+        q = q.where('isPublished', isEqualTo: false);
+        break;
+      case 'cleanup':
+        q = q.where('needsCleanup', isEqualTo: true);
+        break;
+    }
+    q = q.orderBy(FieldPath.documentId);
+    if (after != null) q = q.startAfterDocument(after);
+    return q.limit(promptPageSize);
+  }
+
+  /// Secret prompt texts whose ids fall between [firstId] and [lastId]
+  /// (inclusive) - the same ids as one prompts page.
+  Query<Map<String, dynamic>> promptSecretsRangeQuery(String firstId, String lastId) {
+    return _firestore
+        .collection('promptSecrets')
+        .where(FieldPath.documentId, isGreaterThanOrEqualTo: firstId)
+        .where(FieldPath.documentId, isLessThanOrEqualTo: lastId);
+  }
+
+  /// Cheap totals using Firestore count() aggregation (about 1 read per 1,000
+  /// matching docs instead of one per doc).
+  Future<PromptCounts> promptCounts() async {
+    final col = _firestore.collection('prompts');
+    final results = await Future.wait([
+      col.count().get(),
+      col.where('isPremium', isEqualTo: true).count().get(),
+      col.where('isPublished', isEqualTo: false).count().get(),
+      col.where('needsCleanup', isEqualTo: true).count().get(),
+    ]);
+    return PromptCounts(
+      total: results[0].count ?? 0,
+      premium: results[1].count ?? 0,
+      draft: results[2].count ?? 0,
+      cleanup: results[3].count ?? 0,
+    );
+  }
+
   static const String _uploadImageUrl = "https://ylenfbneddyuzrkckaul.supabase.co/functions/v1/upload-image";
 
   /// Uploads a template image through the `upload-image` edge function
@@ -700,4 +751,12 @@ class BulkUploadResult {
     required this.skippedDuplicate,
     required this.flaggedForCleanup,
   });
+}
+
+class PromptCounts {
+  final int total;
+  final int premium;
+  final int draft;
+  final int cleanup;
+  const PromptCounts({required this.total, required this.premium, required this.draft, required this.cleanup});
 }
